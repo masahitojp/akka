@@ -28,10 +28,19 @@ object TransformationSampleJapiSpecConfig extends MultiNodeConfig {
   // note that no fixed host names and ports are used
   commonConfig(ConfigFactory.parseString("""
     akka.actor.provider = "akka.cluster.ClusterActorRefProvider"
-    akka.remote.log-remote-lifecycle-events = off
     akka.cluster.auto-join = off
     # don't use sigar for tests, native lib not in path
     akka.cluster.metrics.collector-class = akka.cluster.JmxMetricsCollector
+    akka.loglevel = DEBUG
+    akka.remote {
+      log-received-messages = on
+      log-sent-messages = on
+    }
+    akka.actor.debug {
+      receive = on
+      fsm = on
+    }
+    akka.remoting.log-remote-lifecycle-events = on
     """))
 
 }
