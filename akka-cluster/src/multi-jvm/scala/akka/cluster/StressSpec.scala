@@ -372,16 +372,25 @@ object StressMultiJvmSpec extends MultiNodeConfig {
 
   /**
    * Master of routers
+   *
+   * Flow control, to not flood the consumers, is handled by scheduling a
+   * batch of messages to be sent to the router when half of the number
+   * of outstanding messages remains.
+   *
+   * It uses a simple message retry mechanism. If an ack of a sent message
+   * is not received within a timeout, that message will be resent to the router,
+   * infinite number of times.
+   *
+   * When it receives the `End` command it will stop sending messages to the router,
+   * resends continuous, until all outstanding acks have been received, and then
+   * finally it replies with `WorkResult` to the sender of the `End` command, and stops
+   * itself.
    */
   class Master(settings: StressMultiJvmSpec.Settings, batchInterval: FiniteDuration, tree: Boolean) extends Actor {
     val workers = context.actorOf(Props[Worker].withRouter(FromConfig), "workers")
     val payload = Array.fill(settings.payloadSize)(ThreadLocalRandom.current.nextInt(127).toByte)
     val retryTimeout = 5.seconds.dilated(context.system)
-    var idCounter = 0L
-    def nextId(): JobId = {
-      idCounter += 1
-      idCounter
-    }
+    val idCounter = Iterator from 0
     var sendCounter = 0L
     var ackCounter = 0L
     var outstanding = Map.empty[JobId, JobState]
@@ -410,9 +419,7 @@ object StressMultiJvmSpec extends MultiNodeConfig {
         if (outstanding.size == settings.workBatchSize / 2)
           if (batchInterval == Duration.Zero) self ! SendBatch
           else context.system.scheduler.scheduleOnce(batchInterval, self, SendBatch)
-      case SendBatch ⇒
-        if (outstanding.size < settings.workBatchSize)
-          sendJobs()
+      case SendBatch ⇒ sendJobs()
       case RetryTick ⇒ resend()
       case End ⇒
         done(sender)
@@ -441,9 +448,9 @@ object StressMultiJvmSpec extends MultiNodeConfig {
     }
 
     def createJob(): Job = {
-      if (tree) TreeJob(nextId(), payload, ThreadLocalRandom.current.nextInt(settings.treeWidth),
+      if (tree) TreeJob(idCounter.next(), payload, ThreadLocalRandom.current.nextInt(settings.treeWidth),
         settings.treeLevels, settings.treeWidth)
-      else SimpleJob(nextId(), payload)
+      else SimpleJob(idCounter.next(), payload)
     }
 
     def resend(): Unit = {
@@ -550,7 +557,7 @@ object StressMultiJvmSpec extends MultiNodeConfig {
   case class PhiValue(address: Address, countAboveOne: Int, count: Int, max: Double)
   case class ReportTo(ref: Option[ActorRef])
 
-  type JobId = Long
+  type JobId = Int
   trait Job { def id: JobId }
   case class SimpleJob(id: JobId, payload: Any) extends Job
   case class TreeJob(id: JobId, payload: Any, idx: Int, levels: Int, width: Int) extends Job
@@ -799,10 +806,10 @@ abstract class StressSpec
             val previousAddress = previous map { Cluster(_).selfAddress }
             val next =
               if (activeRoles contains myself) {
+                previous foreach { _.shutdown() }
                 val sys = ActorSystem(system.name, system.settings.config)
                 muteLog(sys)
                 Cluster(sys).joinSeedNodes(seedNodes.toIndexedSeq map address)
-                previous foreach { _.shutdown() }
                 Some(sys)
               } else previous
             runOn(roles.take(usedRoles): _*) {
